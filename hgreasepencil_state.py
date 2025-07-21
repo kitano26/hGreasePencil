@@ -49,12 +49,10 @@ class State(object):
             curr_view = self.scene_viewer.curViewport()
 
             # Convert mouse position to world position
-            world_pos = self.get_world_position_from_mouse(kwargs)
-            if isinstance(world_pos, tuple):
-                world_pos = world_pos[0]
+            world_pos = self.get_mouse_world_position(kwargs)
 
-            self.points.append(world_pos)   # Append world position to points list
-            self.update_brush_drawable()   # Update brush drawable
+            self.points.append(world_pos)  
+            self.update_brush_drawable()   
         elif reason == hou.uiEventReason.Changed and self.isDrawing: # LMB is released - commit stroke to geo
             self.commit_stroke()   # Commit stroke to geo
 
@@ -163,22 +161,26 @@ class State(object):
         # Return internal nodes
         return stroke_data_node, python_sop, output_node
 
-    def get_world_position_from_mouse(self, kwargs):
+    def get_mouse_world_position(self, kwargs):
         try:
+            # Get ray starting at camera and passes thru mouse position
             ray_origin, ray_dir = kwargs["ui_event"].ray()
+            
             # Intersect with Z=0 plane
             plane_normal = hou.Vector3(0, 0, 1)
             plane_point = hou.Vector3(0, 0, 0)
             denom = ray_dir.dot(plane_normal)
-            if abs(denom) > 1e-6:
+
+            if abs(denom) > 1e-6:   # if ray is not parallel to plane
                 t = (plane_point - ray_origin).dot(plane_normal) / denom
                 if t > 0:
                     intersection = ray_origin + ray_dir * t
                     return intersection
-            # Fallback: just use ray origin
+                    
+            # Otherwise, use ray origin
             return ray_origin
         except Exception as e:
-            print(f"Error in get_world_position_from_mouse: {e}")
+            print(f"Error in getting mouse world position: {e}")
             return hou.Vector3(0, 0, 0)
 
 def createViewerStateTemplate():

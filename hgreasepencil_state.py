@@ -92,7 +92,6 @@ class State(object):
 
         if "y" in pressed_keys and "Ctrl" in pressed_keys:
             if "Shift" in pressed_keys:
-                print("redo draw")
                 self.redo_draw()
             else:
                 self.undo_draw()

@@ -10,14 +10,23 @@ Date Created:   July 15, 2025 - 17:46:53
 import hou
 import viewerstate.utils as su
 import os
+import uuid
 
 class State(object):
     def __init__(self, state_name, scene_viewer):
         self.state_name = state_name
         self.scene_viewer = scene_viewer
-        self.points = []
+        self.node = self.scene_viewer.currentNode()
+
+        # Drawing state
+        self.mouse_points = []
         self.isDrawing = False
-        self.mouse_pos = None
+
+        # Stroke data
+        self.geo = hou.Geometry()
+        self.strokes = []
+        self.bgeo_file = self.get_bgeo_path()
+        self.load_strokes_from_bgeo()   # Load past saved strokes from .bgeo file
 
         # Set up GeometryDrawable for real-time brush drawing
         self.brush_drawable = hou.GeometryDrawable(
@@ -26,13 +35,14 @@ class State(object):
             "brush_drawable"
         )
         self.brush_drawable.setParams({
-            "color1": hou.Vector4(1, 0, 0, 1),  # Red
+            "color1": self.node.parmTuple("color_alpha").eval(),  
             "line_width": 3.0
         })
         self.brush_drawable.show(True)
 
         # Ensure internal nodes are created and wired up
-        self.stroke_data_node, self.python_sop, self.output_node = self.setup_internal_network()
+        self.python_sop, self.output_node = self.setup_internal_network()
+        self.python_sop.cook(force=True)
 
     def onMouseEvent(self, kwargs):
         """ Process mouse and tablet events """
@@ -43,22 +53,22 @@ class State(object):
         
         if reason == hou.uiEventReason.Start and isLMB: # LMB is pressed - start drawing
             self.isDrawing = True
-            self.points.clear()
+            self.mouse_points.clear()
             self.update_brush_drawable()
         elif reason == hou.uiEventReason.Active and isLMB: # LMB is held down - continue drawing
             curr_view = self.scene_viewer.curViewport()
 
-            # Convert mouse position to world position
+            # Convert mouse position to world position (hou.Vector3)
             world_pos = self.get_mouse_world_position(kwargs)
 
-            self.points.append(world_pos)  
+            self.mouse_points.append(world_pos)  
             self.update_brush_drawable()   
         elif reason == hou.uiEventReason.Changed and self.isDrawing: # LMB is released - commit stroke to geo
             self.commit_stroke()   # Commit stroke to geo
 
             # Reset drawing state
             self.isDrawing = False
-            self.points.clear()
+            self.mouse_points.clear()
 
         # Must return True to continue processing events
         return True
@@ -75,57 +85,80 @@ class State(object):
     def update_brush_drawable(self):
         """Creates geometry based on points list and assigns the geo to brush_drawable"""
 
-        if len(self.points) > 1:
-            geo = hou.Geometry()    # create Geometry container
-            point_objs = [geo.createPoint() for curr_pt in self.points] # create Point objects
+        if len(self.mouse_points) > 1:
+            temp_geo = hou.Geometry()
+
+            # create Point objects
+            point_objs = [temp_geo.createPoint() for curr_pt in self.mouse_points] 
             
-            # set position of each point
-            for pt, point_obj in zip(self.points, point_objs):
+            # Set position of each point
+            for pt, point_obj in zip(self.mouse_points, point_objs):
                 if isinstance(pt, hou.Vector3):
                     point_obj.setPosition(pt) 
-            polyline = geo.createPolygon() # create Polygon object
-            polyline.setIsClosed(False)    # set polygon to be open (so it's a polyline)
 
-            # add each point to the polygon as a vertex
+            # Create a polyline
+            polyline = temp_geo.createPolygon() 
+            polyline.setIsClosed(False)    # Set polygon to be open (so it's a polyline)
+
+            # Add each point to the polygon as a vertex
             for point in point_objs:
                 polyline.addVertex(point)  
 
-            # set brush drawable geometry
-            self.brush_drawable.setGeometry(geo)
+            # Set brush drawable geometry
+            self.brush_drawable.setParams({
+                "color1": self.node.parmTuple("color_alpha").eval(),
+                "line_width": 3.0
+            })
+            self.brush_drawable.setGeometry(temp_geo)
         else:
             self.brush_drawable.setGeometry(hou.Geometry())
 
     def commit_stroke(self):
         """Commits the stroke so it persists in the scene"""
-        if len(self.points) > 1:
-            # Convert points to string format for storage
-            stroke_data = []
-            for pt in self.points:
-                if isinstance(pt, hou.Vector3):
-                    stroke_data.append(f"{pt.x()},{pt.y()},{pt.z()}")
-            try:
-                # Append to existing stroke data
-                existing_data = self.stroke_data_node.parm("stroke_data").eval()
-                if existing_data:
-                    all_strokes = existing_data + "|" + ";".join(stroke_data)
-                else:
-                    all_strokes = ";".join(stroke_data)
-                self.stroke_data_node.parm("stroke_data").set(all_strokes)
-                
-                # Force the Python SOP to recook
-                self.python_sop.cook(force=True)
-            except Exception as e:
-                error_msg = f"Could not store stroke data:\n{e}"
-                hou.ui.displayMessage(error_msg)
+        if len(self.mouse_points) > 1:
+            # Create a new Stroke object for the in-memory list
+            color_alpha = self.node.parmTuple("color_alpha").eval()
+            stroke = Stroke(
+                bgeo=self.bgeo_file,
+                points=[(pt.x(), pt.y(), pt.z()) for pt in self.mouse_points],
+                color=color_alpha[:3]
+            )
+            self.strokes.append(stroke)
 
-    def get_stroke_data_node(self, parent):
-        node = parent.node("hgp_stroke_data")
-        if not node:
-            node = parent.createNode("null", "hgp_stroke_data")
-            node.moveToGoodPosition()
-            node.addSpareParmTuple(hou.StringParmTemplate("stroke_data", "Stroke Data", 1))
-            node.parm("stroke_data").set("")
-        return node
+            # Add the stroke to the .bgeo file and display all the strokes
+            stroke.convert_to_geo(self.geo)
+            self.python_sop.cook(force=True)
+    
+    def get_default_bgeo_path(self):
+        # Get the current .hip file directory
+        hip_dir = os.path.dirname(hou.hipFile.path())
+        # Make a subfolder for strokes if it doesn't exist
+        strokes_dir = os.path.join(hip_dir, "strokes")
+        if not os.path.exists(strokes_dir):
+            os.makedirs(strokes_dir)
+        # Use the node's name and session id for uniqueness
+        node_name = self.node.name()
+        node_id = self.node.sessionId()
+        bgeo_filename = f"{node_name}_{node_id}_strokes.bgeo"
+        return os.path.join(strokes_dir, bgeo_filename)
+
+    def get_bgeo_path(self):
+        parm = self.node.parm("stroke_file").eval()
+        
+        if parm:
+            return parm
+        else:
+            path = self.get_default_bgeo_path()
+            node.parm("stroke_file").set(path)
+            return self.get_default_bgeo_path()
+
+    def load_strokes_from_bgeo(self):
+        """Loads strokes from .bgeo file"""
+        if os.path.exists(self.bgeo_file):
+            self.geo.loadFromFile(self.bgeo_file)
+
+            for prim in self.geo.prims():
+                self.strokes.append(Stroke.convert_from_geo(prim, self.bgeo_file))
 
     def get_python_sop(self, parent):
         node = parent.node("hgp_geometry")
@@ -142,10 +175,8 @@ class State(object):
         return node
 
     def setup_internal_network(self):
-        parent = self.scene_viewer.currentNode()
-        stroke_data_node = self.get_stroke_data_node(parent)
-        python_sop = self.get_python_sop(parent)
-        output_node = self.get_output_node(parent)
+        python_sop = self.get_python_sop(self.node)
+        output_node = self.get_output_node(self.node)
 
         # Always update the Python SOP code from the external file
         sop_code_path = os.path.join(os.path.dirname(__file__), "hgreasepencil_sop_code.py")
@@ -159,7 +190,7 @@ class State(object):
         output_node.setRenderFlag(True)
         
         # Return internal nodes
-        return stroke_data_node, python_sop, output_node
+        return python_sop, output_node
 
     def get_mouse_world_position(self, kwargs):
         try:
@@ -196,3 +227,41 @@ def createViewerStateTemplate():
     template.bindIcon("MISC_python")
 
     return template
+
+class Stroke(object):
+    def __init__(self, bgeo, points, color=(1.0,0.0,0.0), uid=None):
+        self.bgeo_file = bgeo
+        self.points = points
+        self.color = color
+        self.uid = uid or str(uuid.uuid4())
+
+    def convert_to_geo(self, geo):
+        point_objs = [geo.createPoint() for _ in self.points]
+        for pt, pos in zip(point_objs, self.points):
+            pt.setPosition(hou.Vector3(*pos))
+
+        if len(point_objs) > 1:
+            # Create vertices for polyline
+            polyline = geo.createPolygon()
+            polyline.setIsClosed(False)
+            for pt in point_objs:
+                polyline.addVertex(pt)
+
+            # Set attributes
+            color_attr = geo.findPrimAttrib("Cd")
+            if not color_attr:
+                color_attr = geo.addAttrib(hou.attribType.Prim, "Cd", hou.Vector3(1.0, 0.0, 0.0))
+            polyline.setAttribValue(color_attr, hou.Vector3(*self.color))
+
+            uid_attr = geo.findPrimAttrib("uid")
+            if not geo.findPrimAttrib("uid"):
+                uid_attr = geo.addAttrib(hou.attribType.Prim, "uid", "")
+            polyline.setAttribValue(uid_attr, self.uid)
+        
+        geo.saveToFile(self.bgeo_file)
+    
+    def convert_from_geo(prim,bgeo_file):
+        points = [tuple(v.point().position()) for v in prim.vertices()]
+        color = tuple(prim.attribValue("Cd"))
+        uid = prim.attribValue("uid")
+        return Stroke(bgeo_file,points,color,uid)

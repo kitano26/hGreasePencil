@@ -11,6 +11,7 @@ import hou
 import viewerstate.utils as su
 import os
 import uuid
+import copy
 
 class State(object):
     def __init__(self, state_name, scene_viewer):
@@ -27,6 +28,9 @@ class State(object):
         self.strokes = []
         self.bgeo_file = self.get_bgeo_path()
         self.load_strokes_from_bgeo()   # Load past saved strokes from .bgeo file
+
+        # Stroke functionality
+        self.redo_stack = []
 
         # Set up GeometryDrawable for real-time brush drawing
         self.brush_drawable = hou.GeometryDrawable(
@@ -69,6 +73,7 @@ class State(object):
             # Reset drawing state
             self.isDrawing = False
             self.mouse_points.clear()
+            self.update_brush_drawable()
 
         # Must return True to continue processing events
         return True
@@ -78,10 +83,23 @@ class State(object):
            Renders brush_drawable's geometry"""
         handle = kwargs["draw_handle"]
         self.brush_drawable.draw(handle)
+
+    def onKeyEvent(self, kwargs):
+        """ Called for processing a keyboard event"""
+        ui_event = kwargs["ui_event"]
+        state_parms = kwargs["state_parms"]
+        pressed_keys = ui_event.device().keyString().split("+")
+
+        if "y" in pressed_keys and "Ctrl" in pressed_keys:
+            if "Shift" in pressed_keys:
+                print("redo draw")
+                self.redo_draw()
+            else:
+                self.undo_draw()
+
+        # Must returns True to consume the event
+        return True
     
-    """
-    HELPER FUNCTIONS
-    """
     def update_brush_drawable(self):
         """Creates geometry based on points list and assigns the geo to brush_drawable"""
 
@@ -118,16 +136,61 @@ class State(object):
         if len(self.mouse_points) > 1:
             # Create a new Stroke object for the in-memory list
             color_alpha = self.node.parmTuple("color_alpha").eval()
-            stroke = Stroke(
-                bgeo=self.bgeo_file,
+            curr_stroke = Stroke(
                 points=[(pt.x(), pt.y(), pt.z()) for pt in self.mouse_points],
                 color=color_alpha[:3]
             )
-            self.strokes.append(stroke)
+            self.strokes.append(curr_stroke)
 
             # Add the stroke to the .bgeo file and display all the strokes
-            stroke.convert_to_geo(self.geo)
+            curr_stroke.convert_to_geo_format(self.geo)
+            self.geo.saveToFile(self.bgeo_file)
             self.python_sop.cook(force=True)
+
+    def undo_draw(self):
+        if self.strokes:
+            undo_stroke = self.strokes.pop()
+            self.redo_stack.append(copy.deepcopy(undo_stroke))
+            
+            # Remove the stroke from the .bgeo file
+            self.geo.clear()
+            for curr_stroke in self.strokes:
+                curr_stroke.convert_to_geo_format(self.geo)
+            
+            self.geo.saveToFile(self.bgeo_file)
+            self.python_sop.cook(force=True)
+    
+    def redo_draw(self):
+        if self.redo_stack:
+            redo_stroke = self.redo_stack.pop()
+            self.strokes.append(copy.deepcopy(redo_stroke))
+
+            # Add the stroke to the .bgeo file
+            redo_stroke.convert_to_geo_format(self.geo)
+            self.geo.saveToFile(self.bgeo_file)
+            self.python_sop.cook(force=True)
+
+    def get_mouse_world_position(self, kwargs):
+        try:
+            # Get ray starting at camera and passes thru mouse position
+            ray_origin, ray_dir = kwargs["ui_event"].ray()
+            
+            # Intersect with Z=0 plane
+            plane_normal = hou.Vector3(0, 0, 1)
+            plane_point = hou.Vector3(0, 0, 0)
+            denom = ray_dir.dot(plane_normal)
+
+            if abs(denom) > 1e-6:   # if ray is not parallel to plane
+                t = (plane_point - ray_origin).dot(plane_normal) / denom
+                if t > 0:
+                    intersection = ray_origin + ray_dir * t
+                    return intersection
+                    
+            # Otherwise, use ray origin
+            return ray_origin
+        except Exception as e:
+            print(f"Error in getting mouse world position: {e}")
+            return hou.Vector3(0, 0, 0)
     
     def get_default_bgeo_path(self):
         # Get the current .hip file directory
@@ -158,7 +221,7 @@ class State(object):
             self.geo.loadFromFile(self.bgeo_file)
 
             for prim in self.geo.prims():
-                self.strokes.append(Stroke.convert_from_geo(prim, self.bgeo_file))
+                self.strokes.append(Stroke.convert_from_geo_format(prim))
 
     def get_python_sop(self, parent):
         node = parent.node("hgp_geometry")
@@ -192,27 +255,6 @@ class State(object):
         # Return internal nodes
         return python_sop, output_node
 
-    def get_mouse_world_position(self, kwargs):
-        try:
-            # Get ray starting at camera and passes thru mouse position
-            ray_origin, ray_dir = kwargs["ui_event"].ray()
-            
-            # Intersect with Z=0 plane
-            plane_normal = hou.Vector3(0, 0, 1)
-            plane_point = hou.Vector3(0, 0, 0)
-            denom = ray_dir.dot(plane_normal)
-
-            if abs(denom) > 1e-6:   # if ray is not parallel to plane
-                t = (plane_point - ray_origin).dot(plane_normal) / denom
-                if t > 0:
-                    intersection = ray_origin + ray_dir * t
-                    return intersection
-                    
-            # Otherwise, use ray origin
-            return ray_origin
-        except Exception as e:
-            print(f"Error in getting mouse world position: {e}")
-            return hou.Vector3(0, 0, 0)
 
 def createViewerStateTemplate():
     """ Mandatory entry point to create and return the viewer state 
@@ -225,17 +267,17 @@ def createViewerStateTemplate():
     template = hou.ViewerStateTemplate(state_typename, state_label, state_cat)
     template.bindFactory(State)
     template.bindIcon("MISC_python")
+    
 
     return template
 
 class Stroke(object):
-    def __init__(self, bgeo, points, color=(1.0,0.0,0.0), uid=None):
-        self.bgeo_file = bgeo
+    def __init__(self, points, color=(1.0,0.0,0.0), uid=None):
         self.points = points
         self.color = color
         self.uid = uid or str(uuid.uuid4())
 
-    def convert_to_geo(self, geo):
+    def convert_to_geo_format(self, geo):       
         point_objs = [geo.createPoint() for _ in self.points]
         for pt, pos in zip(point_objs, self.points):
             pt.setPosition(hou.Vector3(*pos))
@@ -257,11 +299,10 @@ class Stroke(object):
             if not geo.findPrimAttrib("uid"):
                 uid_attr = geo.addAttrib(hou.attribType.Prim, "uid", "")
             polyline.setAttribValue(uid_attr, self.uid)
-        
-        geo.saveToFile(self.bgeo_file)
     
-    def convert_from_geo(prim,bgeo_file):
+    
+    def convert_from_geo_format(prim):
         points = [tuple(v.point().position()) for v in prim.vertices()]
         color = tuple(prim.attribValue("Cd"))
         uid = prim.attribValue("uid")
-        return Stroke(bgeo_file,points,color,uid)
+        return Stroke(points,color,uid)

@@ -211,7 +211,7 @@ class State(object):
             return parm
         else:
             path = self.get_default_bgeo_path()
-            node.parm("stroke_file").set(path)
+            self.node.parm("stroke_file").set(path)
             return self.get_default_bgeo_path()
 
     def load_strokes_from_bgeo(self):

@@ -5,7 +5,7 @@ Description:    Grease Pencil Effect
 Author:         Katelyn_Itano
 Date Created:   July 15, 2025 - 17:46:53
 """
-# STRING PARAM FOR STROKE DATA - WORKING
+# TODO:switch to camel case and remove shorthand of var names
 
 import hou
 import viewerstate.utils as su
@@ -179,6 +179,7 @@ class State(object):
             plane_point = hou.Vector3(0, 0, 0)
             denom = ray_dir.dot(plane_normal)
 
+            # TODO: rename
             if abs(denom) > 1e-6:   # if ray is not parallel to plane
                 t = (plane_point - ray_origin).dot(plane_normal) / denom
                 if t > 0:
@@ -281,23 +282,25 @@ class Stroke(object):
         for pt, pos in zip(point_objs, self.points):
             pt.setPosition(hou.Vector3(*pos))
 
-        if len(point_objs) > 1:
-            # Create vertices for polyline
-            polyline = geo.createPolygon()
-            polyline.setIsClosed(False)
-            for pt in point_objs:
-                polyline.addVertex(pt)
+        if not len(point_objs) > 1:
+            return
+        
+        # Create vertices for polyline
+        polyline = geo.createPolygon()
+        polyline.setIsClosed(False)
+        for pt in point_objs:
+            polyline.addVertex(pt)
 
-            # Set attributes
-            color_attr = geo.findPrimAttrib("Cd")
-            if not color_attr:
-                color_attr = geo.addAttrib(hou.attribType.Prim, "Cd", hou.Vector3(1.0, 0.0, 0.0))
-            polyline.setAttribValue(color_attr, hou.Vector3(*self.color))
+        # Set attributes
+        color_attr = geo.findPrimAttrib("Cd")
+        if not color_attr:
+            color_attr = geo.addAttrib(hou.attribType.Prim, "Cd", hou.Vector3(1.0, 0.0, 0.0))
+        polyline.setAttribValue(color_attr, hou.Vector3(*self.color))
 
-            uid_attr = geo.findPrimAttrib("uid")
-            if not geo.findPrimAttrib("uid"):
-                uid_attr = geo.addAttrib(hou.attribType.Prim, "uid", "")
-            polyline.setAttribValue(uid_attr, self.uid)
+        uid_attr = geo.findPrimAttrib("uid")
+        if not geo.findPrimAttrib("uid"):
+            uid_attr = geo.addAttrib(hou.attribType.Prim, "uid", "")
+        polyline.setAttribValue(uid_attr, self.uid)
     
     
     def convert_from_geo_format(prim):
